@@ -18,6 +18,7 @@ function MeshLine() {
 	this.next = [];
 	this.side = [];
 	this.width = [];
+	this.time = [];
 	this.indices_array = [];
 	this.uvs = [];
 	this.counters = [];
@@ -31,6 +32,14 @@ function MeshLine() {
 
 MeshLine.prototype.setMatrixWorld = function(matrixWorld) {
 	this.matrixWorld = matrixWorld;
+}
+	
+MeshLine.prototype.setTime = function(time) {
+	this.time = time.reduce((acc, t) => {
+		acc.push(t);
+		acc.push(t);
+		return acc;
+	}, []);
 }
 
 
@@ -313,6 +322,7 @@ MeshLine.prototype.process = function() {
 			next: new THREE.BufferAttribute( new Float32Array( this.next ), 3 ),
 			side: new THREE.BufferAttribute( new Float32Array( this.side ), 1 ),
 			width: new THREE.BufferAttribute( new Float32Array( this.width ), 1 ),
+			time: new THREE.BufferAttribute( new Float32Array( this.time ), 1 ),
 			uv: new THREE.BufferAttribute( new Float32Array( this.uvs ), 2 ),
 			index: new THREE.BufferAttribute( new Uint16Array( this.indices_array ), 1 ),
 			counters: new THREE.BufferAttribute( new Float32Array( this.counters ), 1 )
@@ -328,19 +338,22 @@ MeshLine.prototype.process = function() {
 		this.attributes.side.needsUpdate = true;
 		this.attributes.width.copyArray(new Float32Array(this.width));
 		this.attributes.width.needsUpdate = true;
+		this.attributes.time.copyArray(new Float32Array(this.time));
+		this.attributes.time.needsUpdate = true;
 		this.attributes.uv.copyArray(new Float32Array(this.uvs));
 		this.attributes.uv.needsUpdate = true;
 		this.attributes.index.copyArray(new Uint16Array(this.indices_array));
 		this.attributes.index.needsUpdate = true;
 	}
 
-	this.geometry.setAttribute( 'position', this.attributes.position );
-	this.geometry.setAttribute( 'previous', this.attributes.previous );
-	this.geometry.setAttribute( 'next', this.attributes.next );
-	this.geometry.setAttribute( 'side', this.attributes.side );
-	this.geometry.setAttribute( 'width', this.attributes.width );
-	this.geometry.setAttribute( 'uv', this.attributes.uv );
-	this.geometry.setAttribute( 'counters', this.attributes.counters );
+	this.geometry.addAttribute( 'position', this.attributes.position );
+	this.geometry.addAttribute( 'previous', this.attributes.previous );
+	this.geometry.addAttribute( 'next', this.attributes.next );
+	this.geometry.addAttribute( 'side', this.attributes.side );
+	this.geometry.addAttribute( 'width', this.attributes.width );
+	this.geometry.addAttribute( 'time', this.attributes.time );
+	this.geometry.addAttribute( 'uv', this.attributes.uv );
+	this.geometry.addAttribute( 'counters', this.attributes.counters );
 
 	this.geometry.setIndex( this.attributes.index );
 
@@ -416,6 +429,7 @@ THREE.ShaderChunk[ 'meshline_vert' ] = [
 	'attribute vec3 next;',
 	'attribute float side;',
 	'attribute float width;',
+	'attribute float time;',
 	'attribute float counters;',
 	'',
 	'uniform vec2 resolution;',
@@ -426,6 +440,8 @@ THREE.ShaderChunk[ 'meshline_vert' ] = [
 	'uniform float far;',
 	'uniform float sizeAttenuation;',
 	'',
+	'varying float vTime;',
+	'varying float vSide;',
 	'varying vec2 vUV;',
 	'varying vec4 vColor;',
 	'varying float vCounters;',
@@ -444,6 +460,8 @@ THREE.ShaderChunk[ 'meshline_vert' ] = [
 	'    float aspect = resolution.x / resolution.y;',
 	'    float pixelWidthRatio = 1. / (resolution.x * projectionMatrix[0][0]);',
 	'',
+	'    vTime = time;',
+	'    vSide = side;',
 	'    vColor = vec4( color, opacity );',
 	'    vUV = uv;',
 	'',
@@ -508,8 +526,11 @@ THREE.ShaderChunk[ 'meshline_frag' ] = [
 	'uniform float dashRatio;',
 	'uniform float visibility;',
 	'uniform float alphaTest;',
+	'uniform vec2 currentTime;',
 	'uniform vec2 repeat;',
 	'',
+	'varying float vTime;',
+	'varying float vSide;',
 	'varying vec2 vUV;',
 	'varying vec4 vColor;',
 	'varying float vCounters;',
@@ -518,6 +539,9 @@ THREE.ShaderChunk[ 'meshline_frag' ] = [
 	'',
 	THREE.ShaderChunk.logdepthbuf_fragment,
 	'',
+	'    if( vTime < currentTime.x || vTime > currentTime.y ){',
+        '        discard;',
+        '    }',
 	'    vec4 c = vColor;',
 	'    if( useMap == 1. ) c *= texture2D( map, vUV * repeat );',
 	'    if( useAlphaMap == 1. ) c.a *= texture2D( alphaMap, vUV * repeat ).a;',
@@ -526,7 +550,9 @@ THREE.ShaderChunk[ 'meshline_frag' ] = [
 	'        c.a *= ceil(mod(vCounters + dashOffset, dashArray) - (dashArray * dashRatio));',
 	'    }',
 	'    gl_FragColor = c;',
-	'    gl_FragColor.a *= step(vCounters, visibility);',
+	'    float a1 = exp((vTime - currentTime.x) / (currentTime.y - currentTime.x)) - 1.0;',
+	'    float a2 = exp(-abs(vSide) * 3.0);',
+	'    gl_FragColor.a *= step(vCounters, visibility) * a1 * a2 * 2.0;',
 	'',
 	THREE.ShaderChunk.fog_fragment,
 	'}'
@@ -539,6 +565,7 @@ function MeshLineMaterial( parameters ) {
 			THREE.UniformsLib.fog,
 			{
 				lineWidth: { value: 1 },
+				currentTime: { value: new THREE.Vector2( -1, 1 ) },
 				map: { value: null },
 				useMap: { value: 0 },
 				alphaMap: { value: null },
@@ -731,6 +758,15 @@ function MeshLineMaterial( parameters ) {
 				this.uniforms.repeat.value.copy( value );
 			}
 		},
+		currentTime: {
+			enumerable: true,
+			get: function () {
+				return this.uniforms.currentTime.value;
+			},
+			set: function ( value ) {
+				this.uniforms.currentTime.value.copy( value );
+			}
+		},
 	});
 
 	this.setValues( parameters );
@@ -762,6 +798,7 @@ MeshLineMaterial.prototype.copy = function ( source ) {
 	this.visibility = source.visibility;
 	this.alphaTest = source.alphaTest;
 	this.repeat.copy( source.repeat );
+	this.currentTime.copy( source.currentTime );
 
 	return this;
 
